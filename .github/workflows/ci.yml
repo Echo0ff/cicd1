@@ -49,10 +49,12 @@ jobs:
           host: ${{ vars.TENCENT_HOST }}
           username: ${{ vars.TENCENT_USER }}
           key: ${{ secrets.TENCENT_SSH_KEY }}
-          # 将上一步的版本号传给 SSH 脚本
-          env:
-            IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
           script: |
+            # 【修复语法错误】：直接在脚本层声明变量，不再使用错误的 env 嵌套
+            IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+            
+            echo "====== 准备拉取版本: $IMAGE_TAG ======"
+            
             # 1. 登录腾讯云 Registry (服务器端也需要登录一次)
             docker login ${{ vars.TENCENT_REGISTRY_URL }} \
               --username=${{ vars.TENCENT_REGISTRY_USER }} \
