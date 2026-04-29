@@ -1,51 +1,27 @@
-name: FastAPI CI/CD MVP
+name: V1 - 基础测试流水线
 
-# 1. 触发器：当代码推送到 main 分支时触发
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
 
-# 2. 环境变量配置
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
-# 3. 任务流定义
 jobs:
-  build-and-push:
+  test:
     runs-on: ubuntu-latest
-    
-    # 设置权限，允许推送到 GitHub Packages
-    permissions:
-      contents: read
-      packages: write
-
     steps:
-      # Step 1: 检出代码
-      - name: Checkout repository
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      # Step 2: 登录到 GitHub 容器镜像仓库
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v5
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python-version: "3.10"
+          cache: 'pip' # 缓存依赖，加速后续运行
 
-      # Step 3: 提取 Docker 的元数据 (标签、注释)
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      # Step 4: 构建并推送 Docker 镜像
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: 运行 Pytest 单元测试
+        run: |
+          pytest test_main.py
