@@ -1,74 +1,71 @@
-name: V2 - 规范化构建与部署流水线
+name: V3 - 极速云原生流水线 (Registry)
 
-# 触发条件：只有代码推送到 main 分支时才执行
 on:
   push:
     branches: [ "main" ]
 
 jobs:
-  build-and-deploy:
+  # 阶段一：构建并推送镜像
+  build-and-push:
     runs-on: ubuntu-latest
-    
-    # 【核心进阶】：指定运行环境为 production，流水线会去这里找我们配置好的变量和机密
-    environment: production 
-    
+    environment: production
+    outputs:
+      image_tag: ${{ steps.vars.outputs.sha_short }}
     steps:
-      # Step 1: 检出最新代码
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Step 2: 极速运行内存级单元测试 (验证 FastAPI 逻辑)
-      - name: 运行本地测试
+      - name: 运行单元测试
         run: |
           pip install -r requirements.txt
           pytest test_main.py
 
-      # Step 3: 构建 Docker 镜像
-      - name: 构建 Docker 镜像
-        run: |
-          # 打包镜像并命名为 mvp-app:latest
-          docker build -t mvp-app:latest .
-          # 将镜像导出为 tar 压缩包，方便传输
-          docker save -o mvp-app.tar mvp-app:latest
-
-      # Step 4: 通过 SCP 将压缩包传输到腾讯云
-      - name: SCP 传输镜像包到服务器
-        uses: appleboy/scp-action@master
+      - name: 登录腾讯云镜像库
+        uses: docker/login-action@v3
         with:
-          # 【规范使用】：IP 和 用户名是明文，从 vars 获取
-          host: ${{ vars.TENCENT_HOST }}
-          username: ${{ vars.TENCENT_USER }}
-          # 【规范使用】：私钥是机密，从 secrets 获取
-          key: ${{ secrets.TENCENT_SSH_KEY }}
-          source: "mvp-app.tar"
-          target: "/root/"
+          registry: ${{ vars.TENCENT_REGISTRY_URL }}
+          username: ${{ vars.TENCENT_REGISTRY_USER }}
+          password: ${{ secrets.TENCENT_REGISTRY_PASSWORD }}
 
-      # Step 5: SSH 登录服务器执行部署脚本
-      - name: SSH 登录并重启 Docker 容器
+      - name: 提取版本号
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: 构建并推送镜像
+        run: |
+          # 拼接完整的镜像地址
+          FULL_IMAGE=${{ vars.TENCENT_REGISTRY_URL }}/${{ vars.TENCENT_REGISTRY_NAMESPACE }}/fastapi-app:${{ steps.vars.outputs.sha_short }}
+          docker build -t $FULL_IMAGE .
+          docker push $FULL_IMAGE
+
+  # 阶段二：SSH 远程拉取并运行
+  deploy-to-server:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: SSH 远程部署
         uses: appleboy/ssh-action@master
         with:
           host: ${{ vars.TENCENT_HOST }}
           username: ${{ vars.TENCENT_USER }}
           key: ${{ secrets.TENCENT_SSH_KEY }}
+          # 将上一步的版本号传给 SSH 脚本
+          env:
+            IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
           script: |
-            echo "====== 开始在腾讯云部署 ======"
-            cd /root
+            # 1. 登录腾讯云 Registry (服务器端也需要登录一次)
+            docker login ${{ vars.TENCENT_REGISTRY_URL }} \
+              --username=${{ vars.TENCENT_REGISTRY_USER }} \
+              --password=${{ secrets.TENCENT_REGISTRY_PASSWORD }}
             
-            # 1. 加载刚传过来的镜像包
-            docker load -i mvp-app.tar
+            # 2. 拉取最新镜像 (从腾讯云仓库到北京服务器，走国内骨干网，极快)
+            FULL_IMAGE=${{ vars.TENCENT_REGISTRY_URL }}/${{ vars.TENCENT_REGISTRY_NAMESPACE }}/fastapi-app:$IMAGE_TAG
+            docker pull $FULL_IMAGE
             
-            # 2. 停止并删除旧容器 (如果存在的话，避免端口冲突)
-            docker stop my-mvp-app || true
-            docker rm my-mvp-app || true
+            # 3. 重启容器
+            docker stop fastapi-prod || true
+            docker rm fastapi-prod || true
+            docker run -d --name fastapi-prod -p 8000:8000 --restart unless-stopped $FULL_IMAGE
             
-            # 3. 启动新容器，并演示传入一个环境变量
-            docker run -d \
-              --name my-mvp-app \
-              -p 8000:8000 \
-              --restart unless-stopped \
-              -e APP_ENV="Production_V2_Running" \
-              mvp-app:latest
-            
-            # 4. 清理服务器上的压缩包，释放磁盘空间
-            rm mvp-app.tar
-            echo "====== 部署完成！ ======"
+            # 4. 清理旧镜像，防止占满磁盘
+            docker image prune -f
